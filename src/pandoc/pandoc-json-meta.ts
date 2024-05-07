@@ -14,6 +14,20 @@ export class PandocJsonMeta {
         return new PandocJsonMeta(any, this.getAbsPath(path))
     }
 
+    isArray() {
+        if(this.section === undefined) {
+            return false
+        }
+        else return this.section.t === "MetaList"
+    }
+
+    isMap() {
+        if(this.section === undefined) {
+            return false
+        }
+        else return this.section.t === "MetaMap"
+    }
+
     asArray() {
         if(this.section === undefined) {
             this.reportNotExistError("", "MetaList")
@@ -23,6 +37,16 @@ export class PandocJsonMeta {
             return this.section.c.map((element, index) => {
                 return new PandocJsonMeta(element, this.getAbsPath(String(index)))
             })
+        }
+    }
+
+    getKeys() {
+        if(!this.section) {
+            this.reportNotExistError("", "MetaMap")
+        } else if(this.section.t !== "MetaMap") {
+            this.reportWrongTypeError("", "MetaMap", this.section.t)
+        } else {
+            return Object.keys(this.section.c)
         }
     }
 

@@ -270,6 +270,8 @@ class Node {
                 if (goDeeper) {
                     walk(tmpNode);
                 }
+                // Handle path modification
+                index = path[path.length - 1];
                 path.pop();
             }
         };
@@ -1590,7 +1592,7 @@ class InlineTemplateSubstitution {
             child.visitSubtree("w:t", (paragraphText) => {
                 paragraphText.visitSubtree(keys.text, (textNode) => {
                     let text = textNode.getText();
-                    if (text.indexOf(this.template) !== null) {
+                    if (text.indexOf(this.template) !== -1) {
                         found = true;
                     }
                 });
@@ -1707,10 +1709,10 @@ function metaElementToSource(value) {
     return result.join("");
 }
 
-function getOpenxmlInjection(xml) {
+function getOpenxmlInjection(node) {
     return {
         t: "RawBlock",
-        c: ["openxml", xml]
+        c: ["openxml", node.toXmlString()]
     };
 }
 class PandocJsonPatcher {
@@ -1719,9 +1721,25 @@ class PandocJsonPatcher {
         this.pandocJson = pandocJson;
     }
     replaceDivWithClass(className, replacement) {
+        this.replaceElements("Div", (element) => {
+            if (element.c[0][1].indexOf(className) !== -1) {
+                return replacement(metaElementToSource(element));
+            }
+        });
+        return this;
+    }
+    replaceSpanWithClass(className, replacement) {
+        this.replaceElements("Span", (element) => {
+            if (element.c[0][1].indexOf(className) !== -1) {
+                return replacement(metaElementToSource(element));
+            }
+        });
+        return this;
+    }
+    replaceElements(type, callback) {
         this.pandocJson.blocks = walkPandocElement(this.pandocJson.blocks, (element) => {
-            if (element.t === "Div" && element.c[0][1].indexOf(className) !== -1) {
-                return getOpenxmlInjection(replacement(metaElementToSource(element)).toXmlString());
+            if (element.t === type) {
+                return callback(element);
             }
         });
         return this;
@@ -1739,6 +1757,20 @@ class PandocJsonMeta {
         let any = this.getChild(path);
         return new PandocJsonMeta(any, this.getAbsPath(path));
     }
+    isArray() {
+        if (this.section === undefined) {
+            return false;
+        }
+        else
+            return this.section.t === "MetaList";
+    }
+    isMap() {
+        if (this.section === undefined) {
+            return false;
+        }
+        else
+            return this.section.t === "MetaMap";
+    }
     asArray() {
         if (this.section === undefined) {
             this.reportNotExistError("", "MetaList");
@@ -1750,6 +1782,17 @@ class PandocJsonMeta {
             return this.section.c.map((element, index) => {
                 return new PandocJsonMeta(element, this.getAbsPath(String(index)));
             });
+        }
+    }
+    getKeys() {
+        if (!this.section) {
+            this.reportNotExistError("", "MetaMap");
+        }
+        else if (this.section.t !== "MetaMap") {
+            this.reportWrongTypeError("", "MetaMap", this.section.t);
+        }
+        else {
+            return Object.keys(this.section.c);
         }
     }
     getString(path = "") {
@@ -1812,13 +1855,21 @@ const resourcesDir = path__namespace.dirname(process__namespace.argv[1]) + "/../
 function getLinksParagraphs(document, meta) {
     let styleId = document.styles.resource.getStyleByName("ispLitList").getId();
     let numId = "80";
-    let links = meta.getSection("links").asArray();
+    let linksSection = meta.getSection("links").asArray();
     let result = [];
-    for (let link of links) {
+    for (let link of linksSection) {
+        let description;
+        // Backwards compatibility
+        if (link.isMap()) {
+            description = link.getString("description");
+        }
+        else {
+            description = link.getString();
+        }
         let paragraph = buildParagraphWithStyle(styleId);
         let style = paragraph.getChild("w:pPr");
         style.pushChild(buildNumPr("0", numId));
-        paragraph.pushChild(buildParagraphTextTag(link.getString()));
+        paragraph.pushChild(buildParagraphTextTag(description));
         result.push(paragraph);
     }
     return result;
@@ -1826,32 +1877,38 @@ function getLinksParagraphs(document, meta) {
 function getAuthors(document, meta, language) {
     let styleId = document.styles.resource.getStyleByName("ispAuthor").getId();
     let authors = meta.getSection("authors").asArray();
+    let organizations = meta
+        .getSection("organizations")
+        .asArray()
+        .map(section => section.getString("id"));
     let result = [];
-    let authorIndex = 1;
     for (let author of authors) {
         let paragraph = buildParagraphWithStyle(styleId);
         let name = author.getString("name_" + language);
         let orcid = author.getString("orcid");
         let email = author.getString("email");
-        let indexLine = String(authorIndex);
+        let authorOrgs = author.getSection("organizations")
+            .asArray()
+            .map(section => section.getString())
+            .map(id => organizations.indexOf(id) + 1)
+            .join(",");
         let authorLine = `${name}, ORCID: ${orcid}, <${email}>`;
-        paragraph.pushChild(buildParagraphTextTag(indexLine, [buildSuperscriptTextStyle()]));
+        paragraph.pushChild(buildParagraphTextTag(authorOrgs, [buildSuperscriptTextStyle()]));
         paragraph.pushChild(buildParagraphTextTag(authorLine));
         result.push(paragraph);
-        authorIndex++;
     }
     return result;
 }
 function getOrganizations(document, meta, language) {
     let styleId = document.styles.resource.getStyleByName("ispAuthor").getId();
-    let organizations = meta.getSection("organizations_" + language).asArray();
+    let organizations = meta.getSection("organizations").asArray();
     let orgIndex = 1;
     let result = [];
     for (let organization of organizations) {
         let paragraph = buildParagraphWithStyle(styleId);
         let indexLine = String(orgIndex);
         paragraph.pushChild(buildParagraphTextTag(indexLine, [buildSuperscriptTextStyle()]));
-        paragraph.pushChild(buildParagraphTextTag(organization.getString()));
+        paragraph.pushChild(buildParagraphTextTag(organization.getString("name_" + language)));
         result.push(paragraph);
         orgIndex++;
     }
@@ -1874,27 +1931,34 @@ function getAuthorsDetail(document, meta) {
     }
     return result;
 }
-function getImageCaption(document, content) {
+function getImageCaption(content) {
     // This function is called from patchPandocJson, so this caption is inserted in
     // the content document, not in the template document.
-    // "Image Caption" is a pandoc style that later gets converted to "ispPicture_sign"
-    let styleId = document.styles.resource.getStyleByName("Image Caption").getId();
-    return Node.build("w:p").appendChildren([
+    // "Image Caption" is a pandoc style that gets converted to "ispPicture_sign" later
+    // Unfortunately, style table is not available yet, but it seems that Image Caption style consistently gets converted to
+    // "ImageCaption". It's yet to be asserted.
+    // let styleId = document.styles.resource.getStyleByName("Image Caption").getId()
+    let styleId = "ImageCaption";
+    let node = Node.build("w:p").appendChildren([
         Node.build("w:pPr").appendChildren([
             Node.build("w:pStyle").setAttr("w:val", styleId),
             Node.build("w:contextualSpacing").setAttr("w:val", "true"),
         ]),
         buildParagraphTextTag(content)
     ]);
+    return getOpenxmlInjection(node);
 }
-function getListingCaption(document, content) {
+function getListingCaption(content) {
     // Same note here:
-    // "Body Text" is a pandoc style that later gets converted to "ispText_main"
-    let styleId = document.styles.resource.getStyleByName("Body Text").getId();
-    return Node.build("w:p").appendChildren([
+    // "Body Text" is a pandoc style that gets converted to "ispText_main" later
+    // Unfortunately, style table is not available yet, but it seems that Body Text style consistently gets converted to
+    // "BodyText"
+    // let styleId = document.styles.resource.getStyleByName("Body Text").getId()
+    let styleId = "BodyText";
+    let node = Node.build("w:p").appendChildren([
         Node.build("w:pPr").appendChildren([
             Node.build("w:pStyle").setAttr("w:val", styleId),
-            Node.build("w:jc").setAttr("w:val", "left"),
+            Node.build("w:jc").setAttr("w:val", "left")
         ]),
         buildParagraphTextTag(content, [
             Node.build("w:i"),
@@ -1903,12 +1967,119 @@ function getListingCaption(document, content) {
             Node.build("w:szCs").setAttr("w:val", "18"),
         ])
     ]);
+    return getOpenxmlInjection(node);
 }
-function patchPandocJson(contentDoc, pandocJson) {
+function checkStyleIds(document) {
+    function check(style, expected) {
+        let bodyTextId = document.styles.resource.getStyleByName(style).getId();
+        if (bodyTextId !== expected) {
+            console.warn("Your pandoc version has 'Body Text' style with id '" + bodyTextId + "' instead of '" + expected + "'. Some text styles can be corrupted.");
+        }
+    }
+    check("Body Text", "BodyText");
+    check("Image Caption", "ImageCaption");
+}
+class DocumentReferences {
+    stack = [];
+    depthThreshold = 1;
+    groups = new Map();
+    meta;
+    constructor(meta) {
+        this.meta = meta;
+    }
+    getPrefixMap(prefix) {
+        let map = this.groups.get(prefix);
+        if (!map) {
+            map = new Map();
+            this.groups.set(prefix, map);
+        }
+        return map;
+    }
+    getSection(header) {
+        let depth = Math.max(0, header.c[0] - this.depthThreshold);
+        let label = header.c[1][0];
+        let prefix = label.split(":")[0];
+        let map = this.getPrefixMap(prefix);
+        if (map.has(label)) {
+            console.warn("Multiple definitions of section " + label);
+        }
+        while (this.stack.length > depth)
+            this.stack.pop();
+        if (this.stack.length === depth) {
+            this.stack[this.stack.length - 1]++;
+        }
+        else {
+            while (this.stack.length < depth)
+                this.stack.push(1);
+        }
+        if (this.stack.length === 0) {
+            return;
+        }
+        let result = this.stack.join(".");
+        map.set(label, result);
+        if (this.stack.length == 1) {
+            result += ".";
+        }
+        header.c[2].unshift({
+            "t": "Str",
+            "c": result
+        }, {
+            "t": "Space",
+            "c": undefined
+        });
+    }
+    getReference(reference) {
+        let prefix = reference.split(":")[0];
+        let map = this.getPrefixMap(prefix);
+        let index = map.get(reference);
+        if (index === undefined) {
+            index = (map.size + 1).toString();
+            map.set(reference, index);
+        }
+        return {
+            "t": "Str",
+            "c": index.toString()
+        };
+    }
+    getCite(reference) {
+        let links = this.meta.getSection("links").asArray();
+        for (let i = 0; i < links.length; i++) {
+            let link = links[i];
+            if (link.isMap() && link.getString("id") === reference) {
+                return {
+                    "t": "Str",
+                    "c": "[" + (i + 1).toString() + "]"
+                };
+            }
+        }
+        console.warn("Undefined citation: " + reference);
+        return {
+            "t": "Str",
+            "c": "[?]"
+        };
+    }
+}
+function patchPandocJson(pandocJson, meta) {
+    let references = new DocumentReferences(meta);
     new PandocJsonPatcher(pandocJson)
-        .replaceDivWithClass("img-caption", (contents) => getImageCaption(contentDoc, contents))
-        .replaceDivWithClass("table-caption", (contents) => getListingCaption(contentDoc, contents))
-        .replaceDivWithClass("listing-caption", (contents) => getListingCaption(contentDoc, contents));
+        .replaceElements("Header", (contents) => references.getSection(contents))
+        .replaceSpanWithClass("cite", (contents) => references.getCite(contents))
+        .replaceSpanWithClass("ref", (contents) => references.getReference(contents))
+        .replaceDivWithClass("img-caption", (contents) => getImageCaption(contents))
+        .replaceDivWithClass("table-caption", (contents) => getListingCaption(contents))
+        .replaceDivWithClass("listing-caption", (contents) => getListingCaption(contents));
+}
+function centerDrawings(doc) {
+    let document = doc.document.resource.toXml();
+    document.visitSubtree("w:drawing", (node, path) => {
+        let parentPath = path.slice(0, -2);
+        let parent = document.getChild(parentPath);
+        if (parent.getTagName() !== "w:p")
+            return;
+        parent.getChild("w:pPr").appendChildren([
+            Node.build("w:jc").setAttr("w:val", "center")
+        ]);
+    });
 }
 async function patchTemplateDocx(templateDoc, contentDoc, pandocJsonMeta) {
     await new StyledTemplateSubstitution()
@@ -1919,6 +2090,7 @@ async function patchTemplateDocx(templateDoc, contentDoc, pandocJsonMeta) {
         ["Heading 1", "ispSubHeader-1 level"],
         ["Heading 2", "ispSubHeader-2 level"],
         ["Heading 3", "ispSubHeader-3 level"],
+        ["Heading 4", "ispSubHeader-3 level"],
         ["Author", "ispAuthor"],
         ["Abstract Title", "ispAnotation"],
         ["Abstract", "ispAnotation"],
@@ -1984,6 +2156,7 @@ async function patchTemplateDocx(templateDoc, contentDoc, pandocJsonMeta) {
         .setTemplate("{{{authors_detail}}}")
         .setReplacement(() => getAuthorsDetail(templateDoc, pandocJsonMeta))
         .perform();
+    centerDrawings(templateDoc);
 }
 async function main() {
     let argv = process__namespace.argv;
@@ -1994,13 +2167,16 @@ async function main() {
     let markdownSource = argv[2];
     let targetPath = argv[3];
     let tmpDocPath = targetPath + ".tmp";
-    let contentDoc = await new WordDocument().load(tmpDocPath);
     let markdown = await fs__namespace.promises.readFile(markdownSource, "utf-8");
     let pandocJson = await markdownToPandocJson(markdown, pandocFlags);
-    patchPandocJson(contentDoc, pandocJson);
-    await pandocJsonToDocx(pandocJson, ["-o", tmpDocPath]);
     let pandocJsonMeta = new PandocJsonMeta(pandocJson.meta["ispras_templates"]);
+    await fs__namespace.promises.writeFile(markdownSource + ".json", JSON.stringify(pandocJson, null, 4), "utf-8");
+    patchPandocJson(pandocJson, pandocJsonMeta);
+    await fs__namespace.promises.writeFile(markdownSource + ".patched.json", JSON.stringify(pandocJson, null, 4), "utf-8");
+    await pandocJsonToDocx(pandocJson, ["-o", tmpDocPath]);
     let templateDoc = await new WordDocument().load(resourcesDir + '/isp-reference.docx');
+    let contentDoc = await new WordDocument().load(tmpDocPath);
+    checkStyleIds(contentDoc);
     await patchTemplateDocx(templateDoc, contentDoc, pandocJsonMeta);
     await templateDoc.save(targetPath);
 }

@@ -42,7 +42,7 @@ export default class InlineTemplateSubstitution {
                 paragraphText.visitSubtree(XML.keys.text, (textNode) => {
                     let text = textNode.getText()
 
-                    if(text.indexOf(this.template) !== null) {
+                    if(text.indexOf(this.template) !== -1) {
                         found = true
                     }
                 })

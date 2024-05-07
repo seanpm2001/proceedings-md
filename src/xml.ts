@@ -229,6 +229,8 @@ export class Node {
                     walk(tmpNode)
                 }
 
+                // Handle path modification
+                index = path[path.length - 1]
                 path.pop()
             }
         }
