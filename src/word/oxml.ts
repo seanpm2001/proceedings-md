@@ -78,18 +78,26 @@ export function buildSuperscriptTextStyle(): XML.Node {
     return XML.Node.build("w:vertAlign").setAttr("w:val", "superscript")
 }
 
-export function buildParagraphTextTag(text: string, styles?: XML.Node[]): XML.Node {
-    let result = XML.Node.build("w:r").appendChildren([
-        XML.Node.build("w:t")
-            .setAttr("xml:space", "preserve")
-            .appendChildren([
-                XML.Node.buildTextNode(text)
-            ])
-    ])
+export function buildLineBreak() {
+    return XML.Node.build("w:br")
+}
+
+export function buildTextTag(text: string): XML.Node {
+    return XML.Node.build("w:t")
+        .setAttr("xml:space", "preserve")
+        .appendChildren([
+            XML.Node.buildTextNode(text)
+        ])
+}
+
+export function buildRawTag(text: string, styles?: XML.Node[]): XML.Node {
+    let result = XML.Node.build("w:r")
 
     if(styles) {
-        result.unshiftChild(XML.Node.build("w:rPr").appendChildren(styles))
+        result.pushChild(XML.Node.build("w:rPr").appendChildren(styles))
     }
+
+    result.pushChild(buildTextTag(text))
 
     return result
 }

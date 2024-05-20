@@ -1,99 +1,22 @@
-'use strict';
-
-var path = require('path');
-var fs = require('fs');
-var child_process = require('child_process');
-var fastXmlParser = require('fast-xml-parser');
-var process = require('process');
-var JSZip = require('jszip');
-
-function _interopNamespaceDefault(e) {
-    var n = Object.create(null);
-    if (e) {
-        Object.keys(e).forEach(function (k) {
-            if (k !== 'default') {
-                var d = Object.getOwnPropertyDescriptor(e, k);
-                Object.defineProperty(n, k, d.get ? d : {
-                    enumerable: true,
-                    get: function () { return e[k]; }
-                });
-            }
-        });
-    }
-    n.default = e;
-    return Object.freeze(n);
-}
-
-var path__namespace = /*#__PURE__*/_interopNamespaceDefault(path);
-var fs__namespace = /*#__PURE__*/_interopNamespaceDefault(fs);
-var process__namespace = /*#__PURE__*/_interopNamespaceDefault(process);
-
-function pandoc(src, args) {
-    return new Promise((resolve, reject) => {
-        let stdout = "";
-        let stderr = "";
-        let pandocProcess = child_process.spawn('pandoc', args);
-        pandocProcess.stdin.end(src, 'utf-8');
-        pandocProcess.stdout.on('data', (data) => {
-            stdout += data;
-        });
-        pandocProcess.stderr.on('data', (data) => {
-            stderr += data;
-        });
-        pandocProcess.on('exit', function (code) {
-            if (stderr.length) {
-                console.error("There was some pandoc warnings along the way:");
-                console.error(stderr);
-            }
-            if (code == 0) {
-                resolve(stdout);
-            }
-            else {
-                reject(new Error("Pandoc returned non-zero exit code"));
-            }
-        });
-    });
-}
-async function markdownToPandocJson(markdown, flags) {
-    let meta = await pandoc(markdown, ["-f", "markdown", "-t", "json", ...flags]);
-    return JSON.parse(meta);
-}
-async function pandocJsonToDocx(pandocJson, flags) {
-    return await pandoc(JSON.stringify(pandocJson), ["-f", "json", "-t", "docx", ...flags]);
-}
-const tokenClasses = [
-    "KeywordTok",
-    "NormalTok",
-    "OperatorTok",
-    "DataTypeTok",
-    "PreprocessorTok",
-    "DecValTok",
-    "BaseNTok",
-    "FloatTok",
-    "ConstantTok",
-    "CharTok",
-    "SpecialCharTok",
-    "StringTok",
-    "VerbatimStringTok",
-    "SpecialStringTok",
-    "ImportTok",
-    "CommentTok",
-    "DocumentationTok",
-    "AnnotationTok",
-    "CommentVarTok",
-    "OtherTok",
-    "FunctionTok",
-    "VariableTok",
-    "ControlFlowTok",
-    "BuiltInTok",
-    "ExtensionTok",
-    "AttributeTok",
-    "RegionMarkerTok",
-    "InformationTok",
-    "WarningTok",
-    "AlertTok",
-    "ErrorTok"
-];
+import * as path from 'path';
+import path__default from 'path';
+import * as fs from 'fs';
+import fs__default from 'fs';
+import * as process from 'process';
+import JSZip from 'jszip';
+import { XMLParser, XMLBuilder } from 'fast-xml-parser';
+import yaml from 'yaml';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { frontmatterFromMarkdown } from 'mdast-util-frontmatter';
+import { frontmatter } from 'micromark-extension-frontmatter';
+import { math } from 'micromark-extension-math';
+import { mathFromMarkdown } from 'mdast-util-math';
+import { gfmTableFromMarkdown } from 'mdast-util-gfm-table';
+import { gfmTable } from 'micromark-extension-gfm-table';
+import { visit } from 'unist-util-visit';
+import ImageSize from 'image-size';
+import temml from 'temml';
+import { mml2omml } from 'mathml2omml';
 
 const keys = {
     comment: "__comment__",
@@ -101,7 +24,7 @@ const keys = {
     attributes: ":@",
     document: "__document__"
 };
-const parser = new fastXmlParser.XMLParser({
+const parser = new XMLParser({
     ignoreAttributes: false,
     alwaysCreateTextNode: true,
     attributeNamePrefix: "",
@@ -110,7 +33,7 @@ const parser = new fastXmlParser.XMLParser({
     commentPropName: keys.comment,
     textNodeName: keys.text
 });
-const builder = new fastXmlParser.XMLBuilder({
+const builder = new XMLBuilder({
     ignoreAttributes: false,
     attributeNamePrefix: "",
     preserveOrder: true,
@@ -166,6 +89,7 @@ class Node {
             throw new Error("Cannot call pushChild on " + this.getTagName() + " element");
         }
         children.push(child.raw());
+        return this;
     }
     unshiftChild(child) {
         this.checkTemporary();
@@ -174,6 +98,7 @@ class Node {
             throw new Error("Cannot call unshiftChild on " + this.getTagName() + " element");
         }
         children.unshift(child.raw());
+        return this;
     }
     getChildren(filter = null) {
         this.checkTemporary();
@@ -618,17 +543,22 @@ function buildNumPr(ilvl, numId) {
 function buildSuperscriptTextStyle() {
     return Node.build("w:vertAlign").setAttr("w:val", "superscript");
 }
-function buildParagraphTextTag(text, styles) {
-    let result = Node.build("w:r").appendChildren([
-        Node.build("w:t")
-            .setAttr("xml:space", "preserve")
-            .appendChildren([
-            Node.buildTextNode(text)
-        ])
+function buildLineBreak() {
+    return Node.build("w:br");
+}
+function buildTextTag(text) {
+    return Node.build("w:t")
+        .setAttr("xml:space", "preserve")
+        .appendChildren([
+        Node.buildTextNode(text)
     ]);
+}
+function buildRawTag(text, styles) {
+    let result = Node.build("w:r");
     if (styles) {
-        result.unshiftChild(Node.build("w:rPr").appendChildren(styles));
+        result.pushChild(Node.build("w:rPr").appendChildren(styles));
     }
+    result.pushChild(buildTextTag(text));
     return result;
 }
 function getChildVal(node, tag) {
@@ -655,15 +585,15 @@ function fixXmlns(document, rootTag) {
     document.getChild(rootTag).setAttrs(getProperXmlnsForDocument(document));
 }
 function normalizePath(pathString) {
-    pathString = path.posix.normalize(pathString);
+    pathString = path__default.posix.normalize(pathString);
     if (!pathString.startsWith("/")) {
         pathString = "/" + pathString;
     }
     return pathString;
 }
 function getRelsPath(resourcePath) {
-    let basename = path.basename(resourcePath);
-    let dirname = path.dirname(resourcePath);
+    let basename = path__default.basename(resourcePath);
+    let dirname = path__default.dirname(resourcePath);
     return normalizePath(dirname + "/_rels/" + basename + ".rels");
 }
 
@@ -676,7 +606,7 @@ class Relationships extends Serializable {
             let type = child.getAttr("Type");
             let target = child.getAttr("Target");
             if (id !== undefined && type !== undefined && target !== undefined) {
-                this.relations.set(id, {
+                this.addRelation({
                     id: id,
                     type: type,
                     target: target
@@ -705,6 +635,9 @@ class Relationships extends Serializable {
             index++;
         }
         return prefix + index;
+    }
+    addRelation(relation) {
+        this.relations.set(relation.id, relation);
     }
     getRelForTarget(target) {
         for (let rel of this.relations.values()) {
@@ -780,7 +713,7 @@ class ContentTypes extends Serializable {
         if (overrideContentType !== null) {
             return overrideContentType;
         }
-        const extension = path.extname(pathString).slice(1);
+        const extension = path__default.extname(pathString).slice(1);
         return this.getContentTypeForExt(extension);
     }
     join(other) {
@@ -985,7 +918,7 @@ class Numbering extends Serializable {
     getUnusedNumId() {
         let index = 1;
         while (this.nums.has(String(index))) {
-            index++;
+            index += 2;
         }
         return String(index);
     }
@@ -1066,6 +999,17 @@ const resourceTypes = {
     },
 };
 
+function* uniqueNameGenerator(name) {
+    let index = 0;
+    while (true) {
+        let nameCandidate = name;
+        if (index > 0)
+            nameCandidate += "_" + index;
+        yield nameCandidate;
+        index++;
+    }
+}
+
 const contentTypesPath = "/[Content_Types].xml";
 const globalRelsPath = "/_rels/.rels";
 class WordResource {
@@ -1135,7 +1079,7 @@ class WordDocument {
     headers = [];
     footers = [];
     async load(path) {
-        const contents = await fs.promises.readFile(path);
+        const contents = await fs__default.promises.readFile(path);
         this.zipContents = await JSZip.loadAsync(contents);
         this.contentTypes = await this.createResourceForPath(ResourceFactories.contentTypes, contentTypesPath);
         this.globalRels = await this.createResourceForPath(ResourceFactories.relationships, globalRelsPath);
@@ -1202,6 +1146,20 @@ class WordDocument {
             return null;
         return Node.fromXmlString(await contents.async("string"));
     }
+    getPathForTarget(target) {
+        return "/word/" + target;
+    }
+    getUniqueMediaTarget(name) {
+        let targetPath = "media/";
+        let extension = path__default.extname(name);
+        let basename = path__default.basename(name, extension);
+        for (let uniqueBasename of uniqueNameGenerator(basename)) {
+            let name = targetPath + uniqueBasename + extension;
+            if (!this.zipContents.file(this.getPathForTarget(name))) {
+                return name;
+            }
+        }
+    }
     saveFile(path, data) {
         this.zipContents.file(path.slice(1), data);
     }
@@ -1213,19 +1171,282 @@ class WordDocument {
             resource.save();
         }
         const contents = await this.zipContents.generateAsync({ type: "uint8array" });
-        await fs.writeFileSync(path, contents);
+        await fs__default.writeFileSync(path, contents);
     }
 }
 
-function* uniqueNameGenerator(name) {
-    let index = 0;
-    while (true) {
-        let nameCandidate = name;
-        if (index > 0)
-            nameCandidate += "_" + index;
-        yield nameCandidate;
-        index++;
+function metaType(value) {
+    if (Array.isArray(value))
+        return "array";
+    return typeof value;
+}
+class DocumentJsonMeta {
+    section;
+    path;
+    constructor(section, path = "") {
+        this.section = section;
+        this.path = path;
     }
+    getSection(path) {
+        let any = this.getChild(path);
+        return new DocumentJsonMeta(any, this.getAbsPath(path));
+    }
+    isArray() {
+        if (this.section === undefined) {
+            return false;
+        }
+        else
+            return Array.isArray(this.section);
+    }
+    isMap() {
+        if (this.section === undefined) {
+            return false;
+        }
+        else
+            return (typeof this.section === "object" && !this.isArray());
+    }
+    asArray() {
+        if (this.section === undefined) {
+            this.reportNotExistError("", "array");
+        }
+        else if (!this.isArray()) {
+            this.reportWrongTypeError("", "array", metaType(this.section));
+        }
+        else {
+            return this.section.map((element, index) => {
+                return new DocumentJsonMeta(element, this.getAbsPath(String(index)));
+            });
+        }
+    }
+    getKeys() {
+        if (!this.section) {
+            this.reportNotExistError("", "object");
+        }
+        else if (!this.isMap()) {
+            this.reportWrongTypeError("", "object", metaType(this.section));
+        }
+        else {
+            return Object.keys(this.section);
+        }
+    }
+    getString(path = "") {
+        let child = this.getChild(path);
+        if (!child) {
+            this.reportNotExistError(path, "MetaInlines");
+        }
+        else if (typeof child !== "string") {
+            this.reportWrongTypeError(path, "MetaInlines", metaType(child));
+        }
+        else {
+            return child;
+        }
+    }
+    reportNotExistError(relPath, expected) {
+        let absPath = this.getAbsPath(relPath);
+        throw new Error("Failed to parse document metadata: expected to have " + expected + " at path " + absPath);
+    }
+    reportWrongTypeError(relPath, expected, actual) {
+        let absPath = this.getAbsPath(relPath);
+        throw new Error("Failed to parse document metadata: expected " + expected + " at path " + absPath + ", got " +
+            actual + " instead");
+    }
+    getAbsPath(relPath) {
+        if (this.path.length) {
+            if (relPath.length) {
+                return this.path + "." + relPath;
+            }
+            return this.path;
+        }
+        return relPath;
+    }
+    getChild(path) {
+        if (!path.length)
+            return this.section;
+        let result = this.section;
+        for (let component of path.split(".")) {
+            // Be safe from prototype pollution
+            if (component === "__proto__")
+                return undefined;
+            if (!result)
+                return undefined;
+            if (Array.isArray(result)) {
+                let index = Number.parseInt(component);
+                if (!Number.isNaN(index)) {
+                    result = result[index];
+                }
+            }
+            else if (typeof result === "object") {
+                result = result[component];
+            }
+            else {
+                return undefined;
+            }
+        }
+        return result;
+    }
+    static fromMarkdown(markdown) {
+        let child = markdown.children[0];
+        if (!child)
+            return null;
+        if (child.type !== "yaml")
+            return null;
+        return new DocumentJsonMeta(yaml.parse(child.value));
+    }
+}
+
+class DocumentReferences {
+    stack = [];
+    depthThreshold = 1;
+    groups = new Map();
+    meta;
+    constructor(meta) {
+        this.meta = meta;
+    }
+    getPrefixMap(prefix) {
+        let map = this.groups.get(prefix);
+        if (!map) {
+            map = new Map();
+            this.groups.set(prefix, map);
+        }
+        return map;
+    }
+    getSection(depth, id) {
+        depth = Math.max(0, depth - this.depthThreshold);
+        while (this.stack.length > depth)
+            this.stack.pop();
+        if (this.stack.length === depth) {
+            this.stack[this.stack.length - 1]++;
+        }
+        else {
+            while (this.stack.length < depth)
+                this.stack.push(1);
+        }
+        if (this.stack.length === 0) {
+            return;
+        }
+        let result = this.stack.join(".");
+        if (id) {
+            let prefix = id.split(":")[0];
+            let map = this.getPrefixMap(prefix);
+            if (map.has(id)) {
+                console.warn("Multiple definitions of section " + id);
+            }
+            map.set(id, result);
+        }
+        if (this.stack.length == 1) {
+            result += ".";
+        }
+        return result;
+    }
+    getReference(reference) {
+        let prefix = reference.split(":")[0];
+        let map = this.getPrefixMap(prefix);
+        let index = map.get(reference);
+        if (index === undefined) {
+            index = (map.size + 1).toString();
+            map.set(reference, index);
+        }
+        return index.toString();
+    }
+    getCite(reference) {
+        let links = this.meta.getSection("links").asArray();
+        for (let i = 0; i < links.length; i++) {
+            let link = links[i];
+            if (link.isMap() && link.getString("id") === reference) {
+                return "[" + (i + 1).toString() + "]";
+            }
+        }
+        console.warn("Undefined citation: " + reference);
+        return "[?]";
+    }
+}
+
+function addHeaderReferences(tree) {
+    visit(tree, 'heading', (node) => {
+        let lastChild = node.children[node.children.length - 1];
+        if (!lastChild || lastChild.type !== "text")
+            return;
+        lastChild = lastChild;
+        const match = lastChild.value.match(/\s*{#(.*)}/);
+        if (match) {
+            node.data = node.data || {};
+            node.data.id = match[1];
+            lastChild.value = lastChild.value.replace(/\s*{#.*}/, '').trim();
+        }
+    });
+}
+function removePositions(tree) {
+    visit(tree, (node) => {
+        node.position = undefined;
+    });
+}
+function addReferences(tree) {
+    let meta = DocumentJsonMeta.fromMarkdown(tree);
+    let references = new DocumentReferences(meta);
+    visit(tree, "heading", (node) => {
+        let reference = references.getSection(node.depth, node.data?.id);
+        node.children.unshift({
+            type: "text",
+            value: reference + " "
+        });
+    });
+}
+function parseAttributes(attributeString) {
+    if (!attributeString.startsWith("{") || !attributeString.endsWith("}"))
+        return;
+    attributeString = attributeString.slice(1, -1);
+    let regex = /(\w[\w0-9_-]*)=(?:(?:(?<quote>["'])((?:\\.|[^\\])*?)\k<quote>)|((?:[^'"]\S*)?))/g;
+    let match;
+    let result = Object.create(null);
+    while ((match = regex.exec(attributeString)) !== null) {
+        let key = match[1];
+        let value;
+        if (match[4]) {
+            try {
+                value = JSON.parse('"' + match[4] + '"');
+            }
+            catch (e) {
+                value = match[4];
+            }
+        }
+        else {
+            value = match[3];
+        }
+        result[key] = value;
+    }
+    return result;
+}
+function parseImageAttrs(tree) {
+    visit(tree, (node) => {
+        if ('children' in node) {
+            for (let i = 1; i < node.children.length; i++) {
+                let previous = node.children[i - 1];
+                let current = node.children[i];
+                if (previous.type !== "image" || current.type !== "text") {
+                    continue;
+                }
+                let text = current;
+                let image = previous;
+                let attrs = parseAttributes(text.value);
+                if (attrs) {
+                    image.data = image.data || {};
+                    image.data = { attrs: attrs };
+                    node.children.splice(i, 1);
+                }
+            }
+        }
+    });
+}
+function parseMarkdown(src) {
+    let tree = fromMarkdown(src, {
+        extensions: [math(), gfmTable(), frontmatter(['yaml'])],
+        mdastExtensions: [mathFromMarkdown(), gfmTableFromMarkdown(), frontmatterFromMarkdown(['yaml'])]
+    });
+    addHeaderReferences(tree);
+    removePositions(tree);
+    addReferences(tree);
+    parseImageAttrs(tree);
+    return tree;
 }
 
 class ParagraphTemplateSubstitution {
@@ -1267,295 +1488,6 @@ class ParagraphTemplateSubstitution {
             body.insertChildren(replacement, [i]);
             i += replacement.length - 1;
         }
-    }
-}
-
-const styleTags = ["w:pStyle", "w:rStyle", "w:tblStyle"];
-class StyledTemplateSubstitution {
-    // MARK: Options
-    styleConversion = new Map();
-    stylesToMigrate = new Set();
-    listsConversion = {};
-    source;
-    target;
-    template;
-    allowUnrecognizedStyles = false;
-    // MARK: Internal fields
-    styleIdConversion = new Map();
-    styleIdsToMigrate = new Set();
-    transferredRels = new Map();
-    transferredStyles = new Map();
-    transferredResources = new Map();
-    transferredNumbering = new Map();
-    setStyleConversion(conversion) {
-        this.styleConversion = conversion;
-        return this;
-    }
-    setStylesToMigrate(styles) {
-        this.stylesToMigrate = styles;
-        return this;
-    }
-    setListConversion(conversion) {
-        this.listsConversion = conversion;
-        return this;
-    }
-    setSource(document) {
-        this.source = document;
-        return this;
-    }
-    setTarget(document) {
-        this.target = document;
-        return this;
-    }
-    setTemplate(template) {
-        this.template = template;
-        return this;
-    }
-    setAllowUnrecognizedStyles(allowUnrecognizedStyles) {
-        this.allowUnrecognizedStyles = allowUnrecognizedStyles;
-        return this;
-    }
-    async perform() {
-        this.transferredRels.clear();
-        this.transferredStyles.clear();
-        this.updateStyleIds();
-        let sourceBody = this.source.document.resource.toXml().getChild("w:document").getChild("w:body");
-        let transferredBody = Node.build(sourceBody.getTagName());
-        this.copySubtree(sourceBody, transferredBody);
-        let promises = [];
-        for (let [from, to] of this.transferredResources) {
-            promises.push(this.transferResource(from, to));
-        }
-        await Promise.all(promises);
-        new ParagraphTemplateSubstitution()
-            .setDocument(this.target)
-            .setTemplate(this.template)
-            .setReplacement(() => transferredBody.getChildren())
-            .perform();
-        return this;
-    }
-    copySubtree(from, to) {
-        from.visitChildren((child, index) => {
-            if (child.isLeaf()) {
-                let copy = child.deepCopy();
-                to.insertChildren([copy], [index]);
-                return false;
-            }
-            let tagName = child.getTagName();
-            let attributes = child.getAttrs();
-            let childCopy = Node.build(tagName).setAttrs(attributes);
-            to.insertChildren([childCopy], [index]);
-            this.copySubtree(child, childCopy);
-            this.handleCopy(childCopy);
-            return true;
-        });
-    }
-    async transferResource(from, to) {
-        this.target.saveFile(to, await this.source.getFile(from));
-    }
-    updateStyleIds() {
-        this.styleIdConversion.clear();
-        for (let [sourceStyleName, targetStyleName] of this.styleConversion) {
-            let sourceStyle = this.source.styles.resource.getStyleByName(sourceStyleName);
-            let targetStyle = this.target.styles.resource.getStyleByName(targetStyleName);
-            if (!sourceStyle) {
-                throw new Error("Could not find style named '" + sourceStyleName + "' in source document");
-            }
-            if (!targetStyle) {
-                throw new Error("Could not find style named '" + targetStyleName + "' in target document");
-            }
-            this.styleIdConversion.set(sourceStyle.getId(), targetStyle.getId());
-        }
-        this.styleIdsToMigrate.clear();
-        for (let styleName of this.stylesToMigrate) {
-            let style = this.source.styles.resource.getStyleByName(styleName);
-            this.styleIdsToMigrate.add(style.getId());
-        }
-        return this;
-    }
-    maybeCopyResource(pathString) {
-        if (!this.transferredResources.has(pathString)) {
-            // Choose unique path for the new resource
-            let extname = path.extname(pathString);
-            let basename = path.basename(pathString, extname);
-            let dirname = path.dirname(pathString);
-            for (let candidate of uniqueNameGenerator(dirname + "/" + basename)) {
-                candidate += extname;
-                if (!this.target.hasFile(candidate)) {
-                    this.transferredResources.set(pathString, candidate);
-                    break;
-                }
-            }
-        }
-        return this.transferredResources.get(pathString);
-    }
-    transferRelation(relId) {
-        if (!this.source.document.rels) {
-            throw new Error("Relation attribute is used in a resource without relationships xml");
-        }
-        if (!this.target.document.rels) {
-            this.target.document.setRels(new Relationships());
-        }
-        let relation = this.source.document.rels.relations.get(relId);
-        let existingRelation = this.target.document.rels.getRelForTarget(relation.target);
-        if (existingRelation) {
-            return existingRelation.id;
-        }
-        let dirname = path.dirname(this.source.document.path);
-        let relationPath = normalizePath(dirname + "/" + relation.target);
-        let resourcePath = this.maybeCopyResource(relationPath);
-        let newRelation = {
-            type: relation.type,
-            target: path.relative(dirname, resourcePath),
-            id: this.target.document.rels.getUnusedId()
-        };
-        this.target.document.rels.relations.set(newRelation.id, newRelation);
-        this.transferredRels.set(relId, newRelation.id);
-    }
-    handleStyleNode(node) {
-        if (styleTags.indexOf(node.getTagName()) === -1)
-            return;
-        let style = node.getAttr("w:val");
-        let converted = this.getConvertedStyleId(style);
-        if (converted !== null)
-            node.setAttr("w:val", converted);
-    }
-    getTransferredNumberingFor(numPr) {
-        let numId = numPr.getChild("w:numId").getAttr("w:val");
-        let transferredNumbering = this.transferredNumbering.get(numId);
-        if (transferredNumbering) {
-            return transferredNumbering;
-        }
-        let docNumbering = this.source.numbering.resource;
-        let numbering = docNumbering.nums.get(numId);
-        let abstractNum = docNumbering.abstractNums.get(numbering.getAbstractNumId());
-        let format = abstractNum.getLevel(0)
-            .getChild("w:numFmt")
-            ?.getAttr("w:val");
-        let intendedNumbering;
-        if (format === "decimal") {
-            intendedNumbering = this.listsConversion.decimal;
-        }
-        else if (format === "bullet") {
-            intendedNumbering = this.listsConversion.bullet;
-        }
-        else {
-            throw new Error("Could not convert numbering with format " + format);
-        }
-        transferredNumbering = {
-            styleName: this.target.styles.resource.getStyleByName(intendedNumbering.styleName).getId(),
-            numId: this.createNumbering(intendedNumbering.numId)
-        };
-        this.transferredNumbering.set(numId, transferredNumbering);
-        return transferredNumbering;
-    }
-    handleParagraphNumbering(node) {
-        if (node.getTagName() !== "w:pPr")
-            return;
-        let numPr = node.getChild("w:numPr");
-        if (!numPr)
-            return;
-        let transferredNumbering = this.getTransferredNumberingFor(numPr);
-        numPr.getChild("w:numId").setAttr("w:val", transferredNumbering.numId);
-        node.removeChildren("w:pStyle");
-        node.pushChild(Node.build("w:pStyle")
-            .setAttr("w:val", transferredNumbering.styleName));
-    }
-    createNumbering(abstractId) {
-        let newNumId = this.target.numbering.resource.getUnusedNumId();
-        let newNumbering = new Num().readXml(Node.build("w:num"));
-        newNumbering.setAbstractNumId(abstractId);
-        newNumbering.setId(newNumId);
-        for (let i = 0; i < 8; i++) {
-            newNumbering.getLevelOverride(i).appendChildren([
-                Node.build("w:startOverride")
-                    .setAttr("w:val", "1")
-            ]);
-        }
-        this.target.numbering.resource.nums.set(newNumId, newNumbering);
-        return newNumId;
-    }
-    getConvertedStyleId(styleId) {
-        let conversion = this.styleIdConversion.get(styleId);
-        if (conversion === undefined && this.styleIdsToMigrate.has(styleId)) {
-            conversion = this.migrateSourceStyle(styleId);
-        }
-        if (conversion !== undefined) {
-            return conversion;
-        }
-        if (this.allowUnrecognizedStyles) {
-            return null;
-        }
-        // Some editors can break when the used style was not
-        // defined. As an example, LibreOffice failed to render
-        // the table properly because its paragraphs were using
-        // a non-existent style.
-        // To prevent this, the default behaviour is to throw
-        // an error when unrecognized class is detected.
-        this.reportUnrecognizedSourceStyle(styleId);
-    }
-    handleRelNode(node) {
-        for (let attr of ["r:id", "r:embed"]) {
-            let relId = node.getAttr(attr);
-            if (!relId)
-                continue;
-            if (!this.transferredRels.has(relId)) {
-                this.transferRelation(relId);
-            }
-            node.setAttr(attr, this.transferredRels.get(relId));
-        }
-    }
-    handleCopy(node) {
-        this.handleStyleNode(node);
-        this.handleParagraphNumbering(node);
-        this.handleRelNode(node);
-    }
-    getUnusedTargetStyleName(baseName) {
-        for (let name of uniqueNameGenerator(baseName)) {
-            if (!this.target.styles.resource.getStyleByName(name))
-                return name;
-        }
-    }
-    getUnusedTargetStyleId(baseName) {
-        for (let name of uniqueNameGenerator("migrated_" + baseName)) {
-            if (!this.source.styles.resource.styles.has(name))
-                return name;
-        }
-    }
-    migrateSourceStyle(styleId) {
-        let style = this.source.styles.resource.styles.get(styleId);
-        let copiedStyle = new Style().readXml(style.node.deepCopy());
-        let copiedStyleId = this.getUnusedTargetStyleId(styleId);
-        let copiedStyleName = this.getUnusedTargetStyleName(style.getName());
-        this.styleIdConversion.set(styleId, copiedStyleId);
-        copiedStyle.setId(copiedStyleId);
-        copiedStyle.setName(copiedStyleName);
-        let nextStyle = copiedStyle.getNextStyle();
-        let baseStyle = copiedStyle.getBaseStyle();
-        let linkedStyle = copiedStyle.getLinkedStyle();
-        if (nextStyle !== null) {
-            let converted = this.getConvertedStyleId(nextStyle);
-            if (converted !== null)
-                copiedStyle.setNextStyle(converted);
-        }
-        if (baseStyle !== null) {
-            let converted = this.getConvertedStyleId(baseStyle);
-            if (converted !== null)
-                copiedStyle.setBaseStyle(converted);
-        }
-        if (linkedStyle !== null) {
-            let converted = this.getConvertedStyleId(linkedStyle);
-            if (converted !== null)
-                copiedStyle.setLinkedStyle(converted);
-        }
-        this.target.styles.resource.addStyle(copiedStyle);
-        return copiedStyleId;
-    }
-    reportUnrecognizedSourceStyle(styleId) {
-        let style = this.source.styles.resource.styles.get(styleId);
-        throw new Error("The source document contains style " + style.getName() + " which is not handled " +
-            "by the style conversion ruleset. Provide the substitution for this style, mark it to be " +
-            "migrated or use setAllowUnrecognizedStyle(true).");
     }
 }
 
@@ -1626,234 +1558,274 @@ class InlineTemplateSubstitution {
     }
 }
 
-/*
-    This code was taken from https://github.com/mvhenderson/pandoc-filter-node
-    License for pandoc-filter-node:
-
-    Copyright (c) 2014 Mike Henderson
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in all
-    copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-    THE SOFTWARE.
- */
-function isElement(x) {
-    return (typeof x === "object" && x && "t" in x) || false;
-}
-function walkPandocElement(object, action) {
-    if (Array.isArray(object)) {
-        let array = [];
-        for (const element of object) {
-            if (!isElement(element)) {
-                array.push(walkPandocElement(element, action));
-                continue;
-            }
-            let replacement = action(element);
-            if (replacement) {
-                if (Array.isArray(replacement)) {
-                    array.push(...replacement);
-                }
-                else {
-                    array.push(replacement);
-                }
-            }
-            else {
-                array.push(walkPandocElement(element, action));
-            }
+let DecimalNumberingStyle = { styleId: "ispNumList", numId: "33" };
+let BulletNumberingStyle = { styleId: "ispList1", numId: "43" };
+class GenerationContext {
+    doc;
+    meta;
+    nodeStack = [];
+    numberingStack = [];
+    visit(element) {
+        visitors[element.type]?.(element, this);
+    }
+    visitChildren(element) {
+        for (let child of element.children) {
+            this.visit(child);
         }
-        return array;
     }
-    if (typeof object === "object" && object !== null) {
-        let result = {};
-        for (const key of Object.getOwnPropertyNames(object)) {
-            if (key === "__proto__")
-                continue;
-            result[key] = walkPandocElement(object[key], action);
+    getCurrentNode() {
+        return this.nodeStack[this.nodeStack.length - 1];
+    }
+    pushNode(node) {
+        this.nodeStack.push(node);
+    }
+    popNode() {
+        this.nodeStack.pop();
+    }
+    pushNumberingStyle(style) {
+        this.numberingStack.push(style);
+    }
+    popNumberingStyle() {
+        this.numberingStack.pop();
+    }
+    getNumberingStyle() {
+        return this.numberingStack[this.numberingStack.length - 1];
+    }
+}
+const visitors = {
+    "paragraph": (node, ctx) => {
+        let numberingStyle = ctx.getNumberingStyle();
+        let styleId = numberingStyle ? numberingStyle.styleId : ctx.doc.styles.resource.getStyleByName("ispText_main").getId();
+        let paragraph = buildParagraphWithStyle(styleId);
+        if (numberingStyle) {
+            paragraph.getChild("w:pPr").pushChild(Node.build("w:numPr").appendChildren([
+                Node.build("w:ilvl").setAttr("w:val", String(ctx.numberingStack.length - 1)),
+                Node.build("w:numId").setAttr("w:val", numberingStyle.numId),
+            ]));
         }
-        return result;
-    }
-    return object;
-}
-function metaElementToSource(value) {
-    let result = [];
-    walkPandocElement(value, (child) => {
-        if (child.t === "Str")
-            result.push(child.c);
-        else if (child.t === "Strong")
-            result.push("__" + metaElementToSource(child.c) + "__");
-        else if (child.t === "Emph")
-            result.push("_" + metaElementToSource(child.c) + "_");
-        else if (child.t === "Space")
-            result.push(" ");
-        else if (child.t === "LineBreak")
-            result.push("\n");
-        else if (child.t === "Code")
-            result.push("`" + child.c[1] + "`");
-        else
-            return undefined;
-        return child;
-    });
-    return result.join("");
-}
-
-function getOpenxmlInjection(node) {
-    return {
-        t: "RawBlock",
-        c: ["openxml", node.toXmlString()]
-    };
-}
-class PandocJsonPatcher {
-    pandocJson;
-    constructor(pandocJson) {
-        this.pandocJson = pandocJson;
-    }
-    replaceDivWithClass(className, replacement) {
-        this.replaceElements("Div", (element) => {
-            if (element.c[0][1].indexOf(className) !== -1) {
-                return replacement(metaElementToSource(element));
+        ctx.getCurrentNode().pushChild(paragraph);
+        ctx.pushNode(paragraph);
+        ctx.visitChildren(node);
+        ctx.popNode();
+    },
+    "strong": (node, ctx) => {
+    },
+    "code": (node, ctx) => {
+        let styleId = ctx.doc.styles.resource.getStyleByName("ispListing").getId();
+        let raw = Node.build("w:r");
+        let lines = node.value.split("\n");
+        for (let line of lines) {
+            if (raw.getChildrenCount() > 0) {
+                raw.pushChild(buildLineBreak());
             }
+            raw.pushChild(buildTextTag(line));
+        }
+        ctx.getCurrentNode().pushChild(buildParagraphWithStyle(styleId)
+            .pushChild(raw));
+    },
+    "link": (node, ctx) => {
+    },
+    "delete": (node, ctx) => {
+    },
+    "emphasis": (node, ctx) => {
+    },
+    "text": (node, ctx) => {
+        ctx.getCurrentNode().pushChild(buildRawTag(node.value));
+    },
+    "table": (node, ctx) => {
+        let styleId = ctx.doc.styles.resource.getStyleByName("Table Grid").getId();
+        let table = Node.build("w:tbl");
+        let tableProperties = Node.build("w:tPr").appendChildren([
+            Node.build("w:tblStyle").setAttr("w:val", styleId)
+        ]);
+        table.pushChild(tableProperties);
+        ctx.getCurrentNode().pushChild(table);
+        ctx.pushNode(table);
+        ctx.visitChildren(node);
+        ctx.popNode();
+    },
+    "tableRow": (node, ctx) => {
+        let row = Node.build("w:tr").appendChildren([]);
+        ctx.getCurrentNode().pushChild(row);
+        ctx.pushNode(row);
+        ctx.visitChildren(node);
+        ctx.popNode();
+    },
+    "tableCell": (node, ctx) => {
+        let styleId = ctx.doc.styles.resource.getStyleByName("ispText_main").getId();
+        let paragraph = buildParagraphWithStyle(styleId);
+        let cell = Node.build("w:tc").appendChildren([
+            paragraph
+        ]);
+        ctx.getCurrentNode().pushChild(cell);
+        ctx.pushNode(paragraph);
+        ctx.visitChildren(node);
+        ctx.popNode();
+    },
+    "inlineMath": ((node, ctx) => {
+        let value = temml.renderToString(node.value);
+        let omml = mml2omml(value);
+        ctx.getCurrentNode().pushChild(Node.fromXmlString(omml));
+    }),
+    "listItem": (node, ctx) => {
+        ctx.visitChildren(node);
+    },
+    "image": (node, ctx) => {
+        let imageBuffer = fs__default.readFileSync(node.url);
+        let file = ImageSize(imageBuffer);
+        let size = getImageSize(node, file.width / file.height);
+        // LibreOffice seems to break when filenames contain bad symbols.
+        let mediaName = path__default.basename(node.url).replace(/[^a-zA-Z0-9.]/g, "_");
+        let mediaTarget = ctx.doc.getUniqueMediaTarget(mediaName);
+        let mediaPath = ctx.doc.getPathForTarget(mediaTarget);
+        ctx.doc.saveFile(mediaPath, imageBuffer);
+        let unusedId = ctx.doc.document.rels.getUnusedId();
+        ctx.doc.document.rels.addRelation({
+            id: unusedId,
+            target: mediaTarget,
+            type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
         });
-        return this;
-    }
-    replaceSpanWithClass(className, replacement) {
-        this.replaceElements("Span", (element) => {
-            if (element.c[0][1].indexOf(className) !== -1) {
-                return replacement(metaElementToSource(element));
-            }
+        let image = createImage(unusedId, size[0], size[1]);
+        ctx.getCurrentNode().pushChild(Node.build("w:r").pushChild(image));
+    },
+    "blockquote": (node, ctx) => {
+    },
+    "break": (node, ctx) => {
+    },
+    "heading": (node, ctx) => {
+        let headings = [
+            "ispSubHeader-1 level",
+            "ispSubHeader-2 level",
+            "ispSubHeader-3 level",
+        ];
+        let level = node.depth;
+        if (level > headings.length) {
+            level = headings.length;
+        }
+        let styleId = ctx.doc.styles.resource.getStyleByName(headings[level - 1]).getId();
+        let paragraph = buildParagraphWithStyle(styleId);
+        ctx.getCurrentNode().pushChild(paragraph);
+        ctx.pushNode(paragraph);
+        ctx.visitChildren(node);
+        ctx.popNode();
+    },
+    "imageReference": (node, ctx) => {
+    },
+    "list": (node, ctx) => {
+        let numberingStyle = node.ordered ? DecimalNumberingStyle : BulletNumberingStyle;
+        let numId = createNumbering(ctx.doc, numberingStyle.numId, ctx.numberingStack.length, node.start);
+        ctx.pushNumberingStyle({
+            numId: numId,
+            styleId: numberingStyle.styleId
         });
-        return this;
+        ctx.visitChildren(node);
+        ctx.popNumberingStyle();
+    },
+    "math": (node, ctx) => {
+    },
+    "inlineCode": (node, ctx) => {
+        let styleId = ctx.doc.styles.resource.getStyleByName("ispListing Знак").getId();
+        let raw = buildRawTag(node.value, [
+            Node.build("w:rStyle").setAttr("w:val", styleId)
+        ]);
+        ctx.getCurrentNode().pushChild(raw);
+    },
+};
+function parseSizeAttr(attr) {
+    if (typeof attr !== "string")
+        return null;
+    if (attr.endsWith("cm")) {
+        let centimeters = parseFloat(attr.slice(0, -2));
+        if (Number.isFinite(centimeters))
+            return centimeters;
     }
-    replaceElements(type, callback) {
-        this.pandocJson.blocks = walkPandocElement(this.pandocJson.blocks, (element) => {
-            if (element.t === type) {
-                return callback(element);
-            }
-        });
-        return this;
-    }
+    return null;
 }
-
-class PandocJsonMeta {
-    section;
-    path;
-    constructor(section, path = "") {
-        this.section = section;
-        this.path = path;
+function getImageSize(image, aspect) {
+    let width = parseSizeAttr(image.data?.attrs?.width);
+    let height = parseSizeAttr(image.data?.attrs?.height);
+    if (width === null && height === null) {
+        width = 10;
     }
-    getSection(path) {
-        let any = this.getChild(path);
-        return new PandocJsonMeta(any, this.getAbsPath(path));
+    if (height === null) {
+        height = width / aspect;
     }
-    isArray() {
-        if (this.section === undefined) {
-            return false;
-        }
-        else
-            return this.section.t === "MetaList";
+    if (width === null) {
+        width = aspect * height;
     }
-    isMap() {
-        if (this.section === undefined) {
-            return false;
-        }
-        else
-            return this.section.t === "MetaMap";
-    }
-    asArray() {
-        if (this.section === undefined) {
-            this.reportNotExistError("", "MetaList");
-        }
-        else if (this.section.t !== "MetaList") {
-            this.reportWrongTypeError("", "MetaList", this.section.t);
-        }
-        else {
-            return this.section.c.map((element, index) => {
-                return new PandocJsonMeta(element, this.getAbsPath(String(index)));
-            });
-        }
-    }
-    getKeys() {
-        if (!this.section) {
-            this.reportNotExistError("", "MetaMap");
-        }
-        else if (this.section.t !== "MetaMap") {
-            this.reportWrongTypeError("", "MetaMap", this.section.t);
-        }
-        else {
-            return Object.keys(this.section.c);
-        }
-    }
-    getString(path = "") {
-        let child = this.getChild(path);
-        if (!child) {
-            this.reportNotExistError(path, "MetaInlines");
-        }
-        else if (child.t !== "MetaInlines") {
-            this.reportWrongTypeError(path, "MetaInlines", child.t);
-        }
-        else {
-            return metaElementToSource(child.c);
-        }
-    }
-    reportNotExistError(relPath, expected) {
-        let absPath = this.getAbsPath(relPath);
-        throw new Error("Failed to parse document metadata: expected to have " + expected + " at path " + absPath);
-    }
-    reportWrongTypeError(relPath, expected, actual) {
-        let absPath = this.getAbsPath(relPath);
-        throw new Error("Failed to parse document metadata: expected " + expected + " at path " + absPath + ", got " +
-            actual + " instead");
-    }
-    getAbsPath(relPath) {
-        if (this.path.length) {
-            if (relPath.length) {
-                return this.path + "." + relPath;
-            }
-            return this.path;
-        }
-        return relPath;
-    }
-    getChild(path) {
-        if (!path.length)
-            return this.section;
-        let result = this.section;
-        for (let component of path.split(".")) {
-            // Be safe from prototype pollution
-            if (component === "__proto__")
-                return undefined;
-            if (!result)
-                return undefined;
-            if (result.t === "MetaMap") {
-                result = result.c[component];
-            }
-            if (result.t === "MetaList") {
-                let index = Number.parseInt(component);
-                if (!Number.isNaN(index)) {
-                    result = result.c[index];
-                }
-            }
-        }
-        return result;
-    }
+    return [width, height];
 }
-
-const pandocFlags = ["--tab-stop=8"];
-const languages = ["ru", "en"];
-const resourcesDir = path__namespace.dirname(process__namespace.argv[1]) + "/../resources";
-function getLinksParagraphs(document, meta) {
-    let styleId = document.styles.resource.getStyleByName("ispLitList").getId();
+function createNumbering(document, abstractId, depth, start) {
+    let newNumId = document.numbering.resource.getUnusedNumId();
+    let newNumbering = new Num().readXml(Node.build("w:num"));
+    newNumbering.setAbstractNumId(abstractId);
+    newNumbering.setId(newNumId);
+    newNumbering.getLevelOverride(depth).pushChild(Node.build("w:startOverride")
+        .setAttr("w:val", String(start)));
+    document.numbering.resource.nums.set(newNumId, newNumbering);
+    return newNumId;
+}
+function createImage(id, width, height) {
+    let widthEmu = Math.floor(width * 360000);
+    let heightEmu = Math.floor(height * 360000);
+    return Node.build("w:drawing").appendChildren([
+        Node.build("wp:inline").appendChildren([
+            Node.build("a:graphic").appendChildren([
+                Node.build("a:graphicData").setAttrs({
+                    "uri": "http://schemas.openxmlformats.org/drawingml/2006/picture"
+                }).appendChildren([
+                    Node.build("pic:pic").appendChildren([
+                        Node.build("pic:nvPicPr").appendChildren([
+                            Node.build("pic:cNvPr").setAttrs({
+                                "id": "pic" + id,
+                                "name": "Picture"
+                            }),
+                            Node.build("pic:cNvPicPr")
+                        ]),
+                        Node.build("pic:blipFill").appendChildren([
+                            Node.build("a:blip").setAttr("r:embed", id),
+                            Node.build("a:stretch").appendChildren([
+                                Node.build("a:fillRect")
+                            ])
+                        ]),
+                        Node.build("pic:spPr").appendChildren([
+                            Node.build("a:xfrm").appendChildren([
+                                Node.build("a:off").setAttrs({
+                                    "x": "0",
+                                    "y": "0"
+                                }),
+                                Node.build("a:ext").setAttrs({
+                                    "cx": String(widthEmu),
+                                    "cy": String(heightEmu)
+                                })
+                            ]),
+                            Node.build("a:prstGeom").setAttr("prst", "rect").appendChildren([
+                                Node.build("a:avLst")
+                            ])
+                        ])
+                    ])
+                ])
+            ])
+        ])
+    ]);
+}
+function generateDocxBody(source, target, meta) {
+    new ParagraphTemplateSubstitution()
+        .setDocument(target)
+        .setTemplate("{{{body}}}")
+        .setReplacement(() => {
+        let context = new GenerationContext();
+        // Fictive node
+        let node = Node.build("w:body");
+        context.doc = target;
+        context.pushNode(node);
+        context.visitChildren(source);
+        return node.getChildren();
+    })
+        .perform();
+}
+function getLinksParagraphs(doc, meta) {
+    let styleId = doc.styles.resource.getStyleByName("ispLitList").getId();
     let numId = "80";
     let linksSection = meta.getSection("links").asArray();
     let result = [];
@@ -1869,13 +1841,13 @@ function getLinksParagraphs(document, meta) {
         let paragraph = buildParagraphWithStyle(styleId);
         let style = paragraph.getChild("w:pPr");
         style.pushChild(buildNumPr("0", numId));
-        paragraph.pushChild(buildParagraphTextTag(description));
+        paragraph.pushChild(buildRawTag(description));
         result.push(paragraph);
     }
     return result;
 }
-function getAuthors(document, meta, language) {
-    let styleId = document.styles.resource.getStyleByName("ispAuthor").getId();
+function getAuthors(doc, meta, language) {
+    let styleId = doc.styles.resource.getStyleByName("ispAuthor").getId();
     let authors = meta.getSection("authors").asArray();
     let organizations = meta
         .getSection("organizations")
@@ -1893,29 +1865,29 @@ function getAuthors(document, meta, language) {
             .map(id => organizations.indexOf(id) + 1)
             .join(",");
         let authorLine = `${name}, ORCID: ${orcid}, <${email}>`;
-        paragraph.pushChild(buildParagraphTextTag(authorOrgs, [buildSuperscriptTextStyle()]));
-        paragraph.pushChild(buildParagraphTextTag(authorLine));
+        paragraph.pushChild(buildRawTag(authorOrgs, [buildSuperscriptTextStyle()]));
+        paragraph.pushChild(buildRawTag(authorLine));
         result.push(paragraph);
     }
     return result;
 }
-function getOrganizations(document, meta, language) {
-    let styleId = document.styles.resource.getStyleByName("ispAuthor").getId();
+function getOrganizations(doc, meta, language) {
+    let styleId = doc.styles.resource.getStyleByName("ispAuthor").getId();
     let organizations = meta.getSection("organizations").asArray();
     let orgIndex = 1;
     let result = [];
     for (let organization of organizations) {
         let paragraph = buildParagraphWithStyle(styleId);
         let indexLine = String(orgIndex);
-        paragraph.pushChild(buildParagraphTextTag(indexLine, [buildSuperscriptTextStyle()]));
-        paragraph.pushChild(buildParagraphTextTag(organization.getString("name_" + language)));
+        paragraph.pushChild(buildRawTag(indexLine, [buildSuperscriptTextStyle()]));
+        paragraph.pushChild(buildRawTag(organization.getString("name_" + language)));
         result.push(paragraph);
         orgIndex++;
     }
     return result;
 }
-function getAuthorsDetail(document, meta) {
-    let styleId = document.styles.resource.getStyleByName("ispText_main").getId();
+function getAuthorsDetail(doc, meta) {
+    let styleId = doc.styles.resource.getStyleByName("ispText_main").getId();
     let authors = meta.getSection("authors").asArray();
     let result = [];
     for (let author of authors) {
@@ -1925,215 +1897,28 @@ function getAuthorsDetail(document, meta) {
             newParagraph.getChild("w:pPr").pushChild(Node.build("w:spacing")
                 .setAttr("w:before", "30")
                 .setAttr("w:after", "120"));
-            newParagraph.pushChild(buildParagraphTextTag(line));
+            newParagraph.pushChild(buildRawTag(line));
             result.push(newParagraph);
         }
     }
     return result;
 }
-function getImageCaption(content) {
-    // This function is called from patchPandocJson, so this caption is inserted in
-    // the content document, not in the template document.
-    // "Image Caption" is a pandoc style that gets converted to "ispPicture_sign" later
-    // Unfortunately, style table is not available yet, but it seems that Image Caption style consistently gets converted to
-    // "ImageCaption". It's yet to be asserted.
-    // let styleId = document.styles.resource.getStyleByName("Image Caption").getId()
-    let styleId = "ImageCaption";
-    let node = Node.build("w:p").appendChildren([
-        Node.build("w:pPr").appendChildren([
-            Node.build("w:pStyle").setAttr("w:val", styleId),
-            Node.build("w:contextualSpacing").setAttr("w:val", "true"),
-        ]),
-        buildParagraphTextTag(content)
-    ]);
-    return getOpenxmlInjection(node);
-}
-function getListingCaption(content) {
-    // Same note here:
-    // "Body Text" is a pandoc style that gets converted to "ispText_main" later
-    // Unfortunately, style table is not available yet, but it seems that Body Text style consistently gets converted to
-    // "BodyText"
-    // let styleId = document.styles.resource.getStyleByName("Body Text").getId()
-    let styleId = "BodyText";
-    let node = Node.build("w:p").appendChildren([
-        Node.build("w:pPr").appendChildren([
-            Node.build("w:pStyle").setAttr("w:val", styleId),
-            Node.build("w:jc").setAttr("w:val", "left")
-        ]),
-        buildParagraphTextTag(content, [
-            Node.build("w:i"),
-            Node.build("w:iCs"),
-            Node.build("w:sz").setAttr("w:val", "18"),
-            Node.build("w:szCs").setAttr("w:val", "18"),
-        ])
-    ]);
-    return getOpenxmlInjection(node);
-}
-function checkStyleIds(document) {
-    function check(style, expected) {
-        let bodyTextId = document.styles.resource.getStyleByName(style).getId();
-        if (bodyTextId !== expected) {
-            console.warn("Your pandoc version has 'Body Text' style with id '" + bodyTextId + "' instead of '" + expected + "'. Some text styles can be corrupted.");
-        }
-    }
-    check("Body Text", "BodyText");
-    check("Image Caption", "ImageCaption");
-}
-class DocumentReferences {
-    stack = [];
-    depthThreshold = 1;
-    groups = new Map();
-    meta;
-    constructor(meta) {
-        this.meta = meta;
-    }
-    getPrefixMap(prefix) {
-        let map = this.groups.get(prefix);
-        if (!map) {
-            map = new Map();
-            this.groups.set(prefix, map);
-        }
-        return map;
-    }
-    getSection(header) {
-        let depth = Math.max(0, header.c[0] - this.depthThreshold);
-        let label = header.c[1][0];
-        let prefix = label.split(":")[0];
-        let map = this.getPrefixMap(prefix);
-        if (map.has(label)) {
-            console.warn("Multiple definitions of section " + label);
-        }
-        while (this.stack.length > depth)
-            this.stack.pop();
-        if (this.stack.length === depth) {
-            this.stack[this.stack.length - 1]++;
-        }
-        else {
-            while (this.stack.length < depth)
-                this.stack.push(1);
-        }
-        if (this.stack.length === 0) {
-            return;
-        }
-        let result = this.stack.join(".");
-        map.set(label, result);
-        if (this.stack.length == 1) {
-            result += ".";
-        }
-        header.c[2].unshift({
-            "t": "Str",
-            "c": result
-        }, {
-            "t": "Space",
-            "c": undefined
-        });
-    }
-    getReference(reference) {
-        let prefix = reference.split(":")[0];
-        let map = this.getPrefixMap(prefix);
-        let index = map.get(reference);
-        if (index === undefined) {
-            index = (map.size + 1).toString();
-            map.set(reference, index);
-        }
-        return {
-            "t": "Str",
-            "c": index.toString()
-        };
-    }
-    getCite(reference) {
-        let links = this.meta.getSection("links").asArray();
-        for (let i = 0; i < links.length; i++) {
-            let link = links[i];
-            if (link.isMap() && link.getString("id") === reference) {
-                return {
-                    "t": "Str",
-                    "c": "[" + (i + 1).toString() + "]"
-                };
-            }
-        }
-        console.warn("Undefined citation: " + reference);
-        return {
-            "t": "Str",
-            "c": "[?]"
-        };
-    }
-}
-function patchPandocJson(pandocJson, meta) {
-    let references = new DocumentReferences(meta);
-    new PandocJsonPatcher(pandocJson)
-        .replaceElements("Header", (contents) => references.getSection(contents))
-        .replaceSpanWithClass("cite", (contents) => references.getCite(contents))
-        .replaceSpanWithClass("ref", (contents) => references.getReference(contents))
-        .replaceDivWithClass("img-caption", (contents) => getImageCaption(contents))
-        .replaceDivWithClass("table-caption", (contents) => getListingCaption(contents))
-        .replaceDivWithClass("listing-caption", (contents) => getListingCaption(contents));
-}
-function centerDrawings(doc) {
-    let document = doc.document.resource.toXml();
-    document.visitSubtree("w:drawing", (node, path) => {
-        let parentPath = path.slice(0, -2);
-        let parent = document.getChild(parentPath);
-        if (parent.getTagName() !== "w:p")
-            return;
-        parent.getChild("w:pPr").appendChildren([
-            Node.build("w:jc").setAttr("w:val", "center")
-        ]);
-    });
-}
-async function patchTemplateDocx(templateDoc, contentDoc, pandocJsonMeta) {
-    await new StyledTemplateSubstitution()
-        .setSource(contentDoc)
-        .setTarget(templateDoc)
-        .setTemplate("{{{body}}}")
-        .setStyleConversion(new Map([
-        ["Heading 1", "ispSubHeader-1 level"],
-        ["Heading 2", "ispSubHeader-2 level"],
-        ["Heading 3", "ispSubHeader-3 level"],
-        ["Heading 4", "ispSubHeader-3 level"],
-        ["Author", "ispAuthor"],
-        ["Abstract Title", "ispAnotation"],
-        ["Abstract", "ispAnotation"],
-        ["Block Text", "ispText_main"],
-        ["Body Text", "ispText_main"],
-        ["First Paragraph", "ispText_main"],
-        ["Normal", "Normal"],
-        ["Compact", "Normal"],
-        ["Source Code", "ispListing"],
-        ["Verbatim Char", "ispListing Знак"],
-        ["Image Caption", "ispPicture_sign"],
-        ["Table", "Table Grid"]
-    ]))
-        .setStylesToMigrate(new Set([
-        ...tokenClasses
-    ]))
-        .setAllowUnrecognizedStyles(false)
-        .setListConversion({
-        decimal: {
-            styleName: "ispNumList",
-            numId: "33"
-        },
-        bullet: {
-            styleName: "ispList1",
-            numId: "43"
-        }
-    })
-        .perform();
-    let inlineSubstitution = new InlineTemplateSubstitution().setDocument(templateDoc);
-    let paragraphSubstitution = new ParagraphTemplateSubstitution().setDocument(templateDoc);
+function substituteTemplates(document, meta) {
+    let inlineSubstitution = new InlineTemplateSubstitution().setDocument(document);
+    let paragraphSubstitution = new ParagraphTemplateSubstitution().setDocument(document);
     for (let language of languages) {
         let templates = ["header", "abstract", "keywords", "for_citation", "acknowledgements"];
         for (let template of templates) {
             let template_lang = template + "_" + language;
-            let replacement = pandocJsonMeta.getString(template_lang);
+            let replacement = meta.getString(template_lang);
             inlineSubstitution
                 .setTemplate("{{{" + template_lang + "}}}")
                 .setReplacement(replacement)
                 .perform();
         }
-        let header = pandocJsonMeta.getString("page_header_" + language);
+        let header = meta.getString("page_header_" + language);
         if (header === "@use_citation") {
-            header = pandocJsonMeta.getString("for_citation_" + language);
+            header = meta.getString("for_citation_" + language);
         }
         inlineSubstitution
             .setTemplate("{{{page_header_" + language + "}}}")
@@ -2141,46 +1926,43 @@ async function patchTemplateDocx(templateDoc, contentDoc, pandocJsonMeta) {
             .perform();
         paragraphSubstitution
             .setTemplate("{{{authors_" + language + "}}}")
-            .setReplacement(() => getAuthors(templateDoc, pandocJsonMeta, language))
+            .setReplacement(() => getAuthors(document, meta, language))
             .perform();
         paragraphSubstitution
             .setTemplate("{{{organizations_" + language + "}}}")
-            .setReplacement(() => getOrganizations(templateDoc, pandocJsonMeta, language))
+            .setReplacement(() => getOrganizations(document, meta, language))
             .perform();
     }
     paragraphSubstitution
         .setTemplate("{{{links}}}")
-        .setReplacement(() => getLinksParagraphs(templateDoc, pandocJsonMeta))
+        .setReplacement(() => getLinksParagraphs(document, meta))
         .perform();
     paragraphSubstitution
         .setTemplate("{{{authors_detail}}}")
-        .setReplacement(() => getAuthorsDetail(templateDoc, pandocJsonMeta))
+        .setReplacement(() => getAuthorsDetail(document, meta))
         .perform();
-    centerDrawings(templateDoc);
 }
+
+const languages = ["ru", "en"];
+const resourcesDir = path.dirname(process.argv[1]) + "/../resources";
 async function main() {
-    let argv = process__namespace.argv;
+    let argv = process.argv;
     if (argv.length < 4) {
         console.log("Usage: main.js <source> <target>");
-        process__namespace.exit(1);
+        process.exit(1);
     }
     let markdownSource = argv[2];
     let targetPath = argv[3];
-    let tmpDocPath = targetPath + ".tmp";
-    let markdown = await fs__namespace.promises.readFile(markdownSource, "utf-8");
-    let pandocJson = await markdownToPandocJson(markdown, pandocFlags);
-    let pandocJsonMeta = new PandocJsonMeta(pandocJson.meta["ispras_templates"]);
-    await fs__namespace.promises.writeFile(markdownSource + ".json", JSON.stringify(pandocJson, null, 4), "utf-8");
-    patchPandocJson(pandocJson, pandocJsonMeta);
-    await fs__namespace.promises.writeFile(markdownSource + ".patched.json", JSON.stringify(pandocJson, null, 4), "utf-8");
-    await pandocJsonToDocx(pandocJson, ["-o", tmpDocPath]);
+    let markdown = await fs.promises.readFile(markdownSource, "utf-8");
+    let markdownParsed = parseMarkdown(markdown);
+    await fs.promises.writeFile(markdownSource + ".json", JSON.stringify(markdownParsed, null, 4), "utf-8");
+    let documentMeta = DocumentJsonMeta.fromMarkdown(markdownParsed).getSection("ispras_templates");
     let templateDoc = await new WordDocument().load(resourcesDir + '/isp-reference.docx');
-    let contentDoc = await new WordDocument().load(tmpDocPath);
-    checkStyleIds(contentDoc);
-    await patchTemplateDocx(templateDoc, contentDoc, pandocJsonMeta);
+    await generateDocxBody(markdownParsed, templateDoc);
+    substituteTemplates(templateDoc, documentMeta);
     await templateDoc.save(targetPath);
 }
 main().then();
 
-exports.languages = languages;
+export { languages };
 //# sourceMappingURL=main.js.map

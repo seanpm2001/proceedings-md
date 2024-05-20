@@ -87,6 +87,7 @@ export class Node {
         }
 
         children.push(child.raw())
+        return this
     }
 
     unshiftChild(child: Node) {
@@ -98,6 +99,7 @@ export class Node {
         }
 
         children.unshift(child.raw())
+        return this
     }
 
     getChildren(filter: Filter | null = null): Node[] {

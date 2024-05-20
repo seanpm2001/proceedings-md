@@ -1,10 +1,11 @@
 {
   "compilerOptions": {
-    "module": "esnext",
+    "module": "ES2022",
     "target": "ES2022",
     "esModuleInterop": true,
     "baseUrl": ".",
-    "rootDir": "."
+    "rootDir": ".",
+    "moduleResolution": "Node"
   },
   "plugins": [
     {

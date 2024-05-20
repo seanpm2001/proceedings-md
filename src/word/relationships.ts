@@ -18,7 +18,7 @@ export default class Relationships extends XML.Serializable {
             let target = child.getAttr("Target")
 
             if (id !== undefined && type !== undefined && target !== undefined) {
-                this.relations.set(id, {
+                this.addRelation({
                     id: id,
                     type: type,
                     target: target
@@ -53,6 +53,10 @@ export default class Relationships extends XML.Serializable {
         }
 
         return prefix + index
+    }
+
+    addRelation(relation: Relation) {
+        this.relations.set(relation.id, relation)
     }
 
     getRelForTarget(target: string) {

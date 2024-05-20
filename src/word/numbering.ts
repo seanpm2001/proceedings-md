@@ -92,7 +92,7 @@ export default class Numbering extends XML.Serializable {
     getUnusedNumId() {
         let index = 1
         while(this.nums.has(String(index))) {
-            index++
+            index += 2
         }
         return String(index)
     }

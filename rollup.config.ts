@@ -9,7 +9,7 @@ const production = false
 const config: RollupOptions = {
     input: 'src/main.ts',
     output: {
-        format: 'cjs',
+        format: 'module',
         sourcemap: !production,
         file: 'src/main.js'
     },

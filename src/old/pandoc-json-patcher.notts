@@ -1,14 +1,4 @@
 import * as XML from 'src/xml'
-import {
-    AnyElement,
-    Block,
-    Inline,
-    MetaElement, MetaElementMap,
-    metaElementToSource,
-    MetaElementType,
-    PandocJson,
-    walkPandocElement
-} from "src/pandoc/pandoc-json";
 
 export function getOpenxmlInjection(node: XML.Node): MetaElement<"RawBlock"> {
     return {

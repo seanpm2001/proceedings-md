@@ -7,6 +7,8 @@ import ContentTypes from "src/word/content-types";
 import Styles from "src/word/styles";
 import Numbering from "src/word/numbering";
 import {getResourceTypeForMimeType, resourceTypes, WordResourceType} from "./resource-types";
+import path from "path";
+import {uniqueNameGenerator} from "src/utils";
 
 export const contentTypesPath = "/[Content_Types].xml"
 export const globalRelsPath = "/_rels/.rels"
@@ -173,6 +175,24 @@ export default class WordDocument {
         let contents = this.zipContents.file(path.slice(1))
         if(!contents) return null
         return XML.Node.fromXmlString(await contents.async("string"))
+    }
+
+    getPathForTarget(target: string) {
+        return "/word/" + target
+    }
+
+    getUniqueMediaTarget(name: string) {
+        let targetPath = "media/"
+
+        let extension = path.extname(name)
+        let basename = path.basename(name, extension)
+
+        for(let uniqueBasename of uniqueNameGenerator(basename)) {
+            let name = targetPath + uniqueBasename + extension
+            if(!this.zipContents.file(this.getPathForTarget(name))) {
+                return name
+            }
+        }
     }
 
     saveFile(path: string, data: ArrayBuffer) {

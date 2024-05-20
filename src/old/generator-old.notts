@@ -1,0 +1,262 @@
+import WordDocument from "src/word/word-document";
+import {DocumentJsonMeta} from "src/document-json-meta";
+import * as OXML from "src/word/oxml";
+import * as XML from "src/xml";
+import PandocJsonPatcher, {getOpenxmlInjection} from "src/old/pandoc-json-patcher";
+import {StyledTemplateSubstitution} from "src/word-templates/styled-template-substitution";
+import InlineTemplateSubstitution from "src/word-templates/inline-template-substitution";
+import ParagraphTemplateSubstitution from "src/word-templates/paragraph-template-substitution";
+import {languages} from "src/main";
+
+
+
+function getImageCaption(content: string) {
+    // This function is called from patchPandocJson, so this caption is inserted in
+    // the content document, not in the template document.
+    // "Image Caption" is a pandoc style that gets converted to "ispPicture_sign" later
+    // Unfortunately, style table is not available yet, but it seems that Image Caption style consistently gets converted to
+    // "ImageCaption". It's yet to be asserted.
+
+    // let styleId = document.styles.resource.getStyleByName("Image Caption").getId()
+    let styleId = "ImageCaption"
+
+    let node = XML.Node.build("w:p").appendChildren([
+        XML.Node.build("w:pPr").appendChildren([
+            XML.Node.build("w:pStyle").setAttr("w:val", styleId),
+            XML.Node.build("w:contextualSpacing").setAttr("w:val", "true"),
+        ]),
+        OXML.buildRawTag(content)
+    ]);
+
+    return getOpenxmlInjection(node)
+}
+
+function getListingCaption(content: string) {
+    // Same note here:
+    // "Body Text" is a pandoc style that gets converted to "ispText_main" later
+    // Unfortunately, style table is not available yet, but it seems that Body Text style consistently gets converted to
+    // "BodyText"
+
+    // let styleId = document.styles.resource.getStyleByName("Body Text").getId()
+    let styleId = "BodyText"
+
+    let node = XML.Node.build("w:p").appendChildren([
+        XML.Node.build("w:pPr").appendChildren([
+            XML.Node.build("w:pStyle").setAttr("w:val", styleId),
+            XML.Node.build("w:jc").setAttr("w:val", "left")
+        ]),
+        OXML.buildRawTag(content, [
+            XML.Node.build("w:i"),
+            XML.Node.build("w:iCs"),
+            XML.Node.build("w:sz").setAttr("w:val", "18"),
+            XML.Node.build("w:szCs").setAttr("w:val", "18"),
+        ])
+    ])
+
+    return getOpenxmlInjection(node)
+}
+
+class DocumentReferences {
+    stack: number[] = []
+    depthThreshold: number = 1
+    groups = new Map<string, Map<string, string>>()
+    meta: DocumentJsonMeta
+
+    constructor(meta: DocumentJsonMeta) {
+        this.meta = meta
+    }
+
+    getPrefixMap(prefix: string) {
+        let map = this.groups.get(prefix)
+        if (!map) {
+            map = new Map()
+            this.groups.set(prefix, map)
+        }
+        return map
+    }
+
+    getSection(header: MetaElement<"Header">) {
+        let depth = Math.max(0, header.c[0] - this.depthThreshold)
+        let label = header.c[1][0]
+
+        let prefix = label.split(":")[0]
+        let map = this.getPrefixMap(prefix)
+
+        if (map.has(label)) {
+            console.warn("Multiple definitions of section " + label)
+        }
+
+        while (this.stack.length > depth) this.stack.pop()
+        if (this.stack.length === depth) {
+            this.stack[this.stack.length - 1]++
+        } else {
+            while (this.stack.length < depth) this.stack.push(1)
+        }
+
+        if (this.stack.length === 0) {
+            return
+        }
+
+        let result = this.stack.join(".")
+        map.set(label, result)
+
+        if (this.stack.length == 1) {
+            result += "."
+        }
+
+        header.c[2].unshift({
+            "t": "Str",
+            "c": result
+        }, {
+            "t": "Space",
+            "c": undefined
+        })
+    }
+
+    getReference(reference: string): MetaElement<"Str"> {
+        let prefix = reference.split(":")[0]
+        let map = this.getPrefixMap(prefix)
+
+        let index = map.get(reference)
+        if (index === undefined) {
+            index = (map.size + 1).toString()
+            map.set(reference, index)
+        }
+
+        return {
+            "t": "Str",
+            "c": index.toString()
+        }
+    }
+
+    getCite(reference: string): MetaElement<"Str"> {
+        let links = this.meta.getSection("links").asArray()
+        for (let i = 0; i < links.length; i++) {
+            let link = links[i]
+            if (link.isMap() && link.getString("id") === reference) {
+                return {
+                    "t": "Str",
+                    "c": "[" + (i + 1).toString() + "]"
+                }
+            }
+        }
+
+        console.warn("Undefined citation: " + reference)
+
+        return {
+            "t": "Str",
+            "c": "[?]"
+        }
+    }
+}
+
+function patchPandocJson(pandocJson: PandocJson, meta: DocumentJsonMeta) {
+    let references = new DocumentReferences(meta)
+
+    new PandocJsonPatcher(pandocJson)
+        .replaceElements("Header", (contents) => references.getSection(contents))
+        .replaceSpanWithClass("cite", (contents) => references.getCite(contents))
+        .replaceSpanWithClass("ref", (contents) => references.getReference(contents))
+        .replaceDivWithClass("img-caption", (contents) => getImageCaption(contents))
+        .replaceDivWithClass("table-caption", (contents) => getListingCaption(contents))
+        .replaceDivWithClass("listing-caption", (contents) => getListingCaption(contents))
+}
+
+function centerDrawings(doc: WordDocument) {
+    let document = doc.document.resource.toXml()
+    document.visitSubtree("w:drawing", (node: XML.Node, path: XML.Path) => {
+        let parentPath = path.slice(0, -2)
+        let parent = document.getChild(parentPath)
+        if (parent.getTagName() !== "w:p") return
+
+        parent.getChild("w:pPr").appendChildren([
+            XML.Node.build("w:jc").setAttr("w:val", "center")
+        ])
+    })
+}
+
+async function patchTemplateDocx(templateDoc: WordDocument, pandocJsonMeta: DocumentJsonMeta) {
+    await new StyledTemplateSubstitution()
+        .setTarget(templateDoc)
+        .setTemplate("{{{body}}}")
+        .setStyleConversion(new Map([
+            ["Heading 1", "ispSubHeader-1 level"],
+            ["Heading 2", "ispSubHeader-2 level"],
+            ["Heading 3", "ispSubHeader-3 level"],
+            ["Heading 4", "ispSubHeader-3 level"],
+            ["Author", "ispAuthor"],
+            ["Abstract Title", "ispAnotation"],
+            ["Abstract", "ispAnotation"],
+            ["Block Text", "ispText_main"],
+            ["Body Text", "ispText_main"],
+            ["First Paragraph", "ispText_main"],
+            ["Normal", "Normal"],
+            ["Compact", "Normal"],
+            ["Source Code", "ispListing"],
+            ["Verbatim Char", "ispListing Знак"],
+            ["Image Caption", "ispPicture_sign"],
+            ["Table", "Table Grid"]
+        ]))
+        .setAllowUnrecognizedStyles(false)
+        .setListConversion({
+            decimal: {
+                styleName: "ispNumList",
+                numId: "33"
+            },
+            bullet: {
+                styleName: "ispList1",
+                numId: "43"
+            }
+        })
+        .perform();
+
+    let inlineSubstitution = new InlineTemplateSubstitution().setDocument(templateDoc)
+    let paragraphSubstitution = new ParagraphTemplateSubstitution().setDocument(templateDoc)
+
+    for (let language of languages) {
+        let templates = ["header", "abstract", "keywords", "for_citation", "acknowledgements"]
+        for (let template of templates) {
+
+            let template_lang = template + "_" + language
+            let replacement = pandocJsonMeta.getString(template_lang)
+
+            inlineSubstitution
+                .setTemplate("{{{" + template_lang + "}}}")
+                .setReplacement(replacement)
+                .perform()
+        }
+
+        let header = pandocJsonMeta.getString("page_header_" + language)
+
+        if (header === "@use_citation") {
+            header = pandocJsonMeta.getString("for_citation_" + language)
+        }
+
+        inlineSubstitution
+            .setTemplate("{{{page_header_" + language + "}}}")
+            .setReplacement(header)
+            .perform()
+
+        paragraphSubstitution
+            .setTemplate("{{{authors_" + language + "}}}")
+            .setReplacement(() => getAuthors(templateDoc, pandocJsonMeta, language))
+            .perform()
+
+        paragraphSubstitution
+            .setTemplate("{{{organizations_" + language + "}}}")
+            .setReplacement(() => getOrganizations(templateDoc, pandocJsonMeta, language))
+            .perform()
+    }
+
+    paragraphSubstitution
+        .setTemplate("{{{links}}}")
+        .setReplacement(() => getLinksParagraphs(templateDoc, pandocJsonMeta))
+        .perform()
+
+    paragraphSubstitution
+        .setTemplate("{{{authors_detail}}}")
+        .setReplacement(() => getAuthorsDetail(templateDoc, pandocJsonMeta))
+        .perform()
+
+    centerDrawings(templateDoc)
+}

@@ -3,8 +3,19 @@
   "version": "1.0.0",
   "dependencies": {
     "fast-xml-parser": "^4.3.2",
-    "jszip": "^3.10.1"
+    "image-size": "^1.1.1",
+    "jszip": "^3.10.1",
+    "mathml2omml": "^0.4.0",
+    "mdast-util-from-markdown": "^2.0.0",
+    "mdast-util-frontmatter": "^2.0.1",
+    "mdast-util-gfm-table": "^2.0.0",
+    "mdast-util-math": "^3.0.0",
+    "micromark-extension-gfm-table": "^2.0.0",
+    "micromark-extension-math": "^3.0.0",
+    "temml": "^0.10.24",
+    "yaml": "^2.4.2"
   },
+  "type": "module",
   "devDependencies": {
     "@rollup/plugin-commonjs": "^25.0.7",
     "@rollup/plugin-node-resolve": "^15.2.3",
